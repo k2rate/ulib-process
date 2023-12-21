@@ -121,6 +121,7 @@ namespace ulib
         void detach();
         void terminate();
 
+        std::optional<int> check();
         inline bool is_bound() { return mHandle != 0; }
         inline int pid() { return mPid; }
 

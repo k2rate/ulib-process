@@ -302,6 +302,11 @@ namespace ulib
                 ulib::format("TerminateProcess failed: {}", win32::detail::GetLastErrorAsString()));
     }
 
+    std::optional<int> process::check()
+    {
+        return wait(std::chrono::milliseconds(0));
+    }
+
     void process::destroy_pipes()
     {
         mInPipe.close();
