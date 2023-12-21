@@ -180,6 +180,8 @@ TEST(Process, Detach)
     kill_pid(childPid);
 }
 
+#if defined(__linux__) || defined(ULIB_PROCESS_WINDOWS)
+
 TEST(Process, WithDieWithParent)
 {
     int childPid = -1;
@@ -195,6 +197,8 @@ TEST(Process, WithDieWithParent)
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     ASSERT_FALSE(is_pid_process_working(childPid));
 }
+
+#endif
 
 TEST(Process, WithoutDieWithParent)
 {

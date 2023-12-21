@@ -5,6 +5,7 @@
 
 #include <ulib/string.h>
 #include <filesystem>
+#include <optional>
 
 #include "../../process_exceptions.h"
 

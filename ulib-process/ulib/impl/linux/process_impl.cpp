@@ -5,7 +5,9 @@
 
 #include <unistd.h>
 #include <sys/wait.h>
+#ifdef __linux__
 #include <sys/prctl.h>
+#endif
 #include <fcntl.h>
 #include <ulib/format.h>
 
@@ -379,8 +381,11 @@ namespace ulib
         {
             try
             {
+#ifdef __linux__
                 if (flags & die_with_parent)
                 {
+                    // setsid();
+
                     int r = prctl(PR_SET_PDEATHSIG, SIGKILL);
                     if (r == -1)
                     {
@@ -392,7 +397,7 @@ namespace ulib
                         throw process_internal_error{"getppid() != pid_before_fork"};
                     }
                 }
-
+#endif
                 if (flags & pipe_stdin)
                 {
                     int fn = fileno(stdin);
@@ -470,8 +475,6 @@ namespace ulib
                 p_sink.closefd(1);
                 ::_exit(EXIT_FAILURE);
             }
-
-            
         }
         else if (pid == -1)
         {
@@ -513,7 +516,7 @@ namespace ulib
                 }
                 else
                 {
-                     throw process_internal_error{"read sink pipe is invalid"};
+                    throw process_internal_error{"read sink pipe is invalid"};
                 }
             }
 

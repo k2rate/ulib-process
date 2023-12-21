@@ -10,6 +10,7 @@
 #include "process_killonclosejob.h"
 
 #include <chrono>
+#include <optional>
 
 #include "../../process_exceptions.h"
 
