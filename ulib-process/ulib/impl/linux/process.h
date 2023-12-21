@@ -6,6 +6,7 @@
 #include <ulib/string.h>
 #include <filesystem>
 #include <optional>
+#include <signal.h>
 
 #include "../../process_exceptions.h"
 
