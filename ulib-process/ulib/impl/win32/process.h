@@ -21,11 +21,13 @@ namespace ulib
         enum flag
         {
             noflags = 0,
+            
             pipe_stdin = 1,
             pipe_stdout = 2,
             pipe_stderr = 4,
-            spawn_detached = 8,
-            pipe_output = 16,
+            pipe_output = 8,
+
+            die_with_parent = 16,
             create_new_console = 32,
         };
 
@@ -101,7 +103,7 @@ namespace ulib
         process(ulib::u8string_view line, uint32 flags = noflags,
                 std::optional<std::filesystem::path> workingDirectory = std::nullopt);
         process(const process &) = delete;
-        process(process &other);
+        process(process &&other);
         ~process();
 
         process &operator=(process &&other);
@@ -117,17 +119,24 @@ namespace ulib
         bool is_running();
         bool is_finished();
         void detach();
+        void terminate();
 
         inline bool is_bound() { return mHandle != 0; }
+        inline int pid() { return mPid; }
 
         inline wpipe &in() { return mInPipe; }
         inline rpipe &out() { return mOutPipe; }
         inline rpipe &err() { return mErrPipe; }
 
+
+
     private:
         void run(ulib::wstring &line, uint32 flags, std::optional<std::filesystem::path> workingDirectory);
         void destroy_pipes();
-
+        void destroy_handles();
+        void finish();
+        void move_init(process&& other);
+        
         void *mHandle;
 
         wpipe mInPipe;
@@ -135,6 +144,8 @@ namespace ulib
         rpipe mErrPipe;
 
         win32::process::KillOnCloseJob mJob;
+        int mPid;
+        bool mWaited;
     };
 } // namespace ulib
 

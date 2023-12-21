@@ -100,34 +100,39 @@ namespace ulib
         return size_t(written);
     }
 
-    process::process() { mHandle = 0; }
+    size_t process::wpipe::write(ulib::string_view str)
+    {
+        return this->write(str.data(), str.size());
+    }
+
+    process::process()
+    {
+        mHandle = 0;
+        mWaited = false;
+        mPid = 0;
+    }
     process::process(const std::filesystem::path &path, const ulib::list<ulib::u8string> &args, uint32 flags,
                      std::optional<std::filesystem::path> workingDirectory)
     {
+        mHandle = 0;
+        mWaited = false;
+        mPid = 0;
         this->run(path, args, flags, workingDirectory);
     }
     process::process(ulib::u8string_view line, uint32 flags, std::optional<std::filesystem::path> workingDirectory)
     {
+        mHandle = 0;
+        mWaited = false;
+        mPid = 0;
         this->run(line, flags, workingDirectory);
     }
-    process::process(process &other)
-    {
-        mHandle = other.mHandle;
-        other.mHandle = nullptr;
-
-        mJob = std::move(other.mJob);
-        mInPipe = std::move(other.mInPipe);
-        mOutPipe = std::move(other.mOutPipe);
-        mErrPipe = std::move(other.mErrPipe);
-    }
-    process::~process() { this->detach(); }
+    process::process(process &&other) { this->move_init(std::move(other)); }
+    process::~process() { this->finish(); }
 
     process &process::operator=(process &&other)
     {
-        this->detach();
-
-        mHandle = other.mHandle;
-        other.mHandle = nullptr;
+        this->finish();
+        this->move_init(std::move(other));
 
         return *this;
     }
@@ -150,18 +155,35 @@ namespace ulib
         this->run(wline, flags, workingDirectory);
     }
 
+    void check_flags(uint32 flags)
+    {
+        if (flags & process::pipe_output)
+        {
+            if (flags & process::pipe_stdout)
+                throw process_invalid_flags_error{"pipe_stdout flag is incompatible with pipe_output flag"};
+
+            if (flags & process::pipe_stderr)
+                throw process_invalid_flags_error{"pipe_stderr flag is incompatible with pipe_output flag"};
+        }
+    }
+
     void process::run(ulib::wstring &line, uint32 flags, std::optional<std::filesystem::path> workingDirectory)
     {
+        check_flags(flags);
+
         try
         {
             bool useRedirect =
                 (flags & pipe_stdin) || (flags & pipe_stdout) || (flags & pipe_stderr) || (flags & pipe_output);
 
-            bool useJob = !(flags & spawn_detached);
+            bool useJob = (flags & die_with_parent);
             if (useJob)
             {
                 if (win32::process::IsInJob())
+                {
+                    // printf("job disabled because already in job\n");
                     useJob = false;
+                }
             }
 
             // ulib::wstring wline = ulib::wstr(line);
@@ -214,6 +236,7 @@ namespace ulib
                                pwszWorkingDirectory, &si, &pi))
             {
                 mHandle = pi.hProcess;
+                mPid = pi.dwProcessId;
 
                 mInPipe = wpipe{inputPipe.RedirectHandle()};
                 mOutPipe = rpipe{outputPipe.RedirectHandle()};
@@ -242,7 +265,7 @@ namespace ulib
         }
         catch (...)
         {
-            detach();
+            destroy_handles();
             throw;
         }
     }
@@ -260,6 +283,7 @@ namespace ulib
                 throw process_internal_error(
                     ulib::format("GetExitCodeProcess failed: {}", win32::detail::GetLastErrorAsString()));
 
+            mWaited = true;
             return int(exitCode);
         }
 
@@ -270,8 +294,22 @@ namespace ulib
     int process::wait() { return wait(std::chrono::milliseconds{0xFFFFFFFF}).value(); }
     bool process::is_running() { return !is_finished(); }
     bool process::is_finished() { return wait(std::chrono::milliseconds(0)).has_value(); }
+    void process::detach() { destroy_handles(); }
+    void process::terminate()
+    {
+        if (!::TerminateProcess(mHandle, 260))
+            throw process_internal_error(
+                ulib::format("TerminateProcess failed: {}", win32::detail::GetLastErrorAsString()));
+    }
 
-    void process::detach()
+    void process::destroy_pipes()
+    {
+        mInPipe.close();
+        mOutPipe.close();
+        mErrPipe.close();
+    }
+
+    void process::destroy_handles()
     {
         if (mHandle)
         {
@@ -282,11 +320,34 @@ namespace ulib
         destroy_pipes();
     }
 
-    void process::destroy_pipes()
+    void process::finish()
     {
-        mInPipe.close();
-        mOutPipe.close();
-        mErrPipe.close();
+        try
+        {
+            if (this->is_bound())
+                if (!mWaited)
+                    this->terminate();
+
+            destroy_handles();
+        }
+        catch (...)
+        {
+            std::terminate();
+        }
+    }
+
+    void process::move_init(process &&other)
+    {
+        mHandle = other.mHandle;
+        other.mHandle = nullptr;
+
+        mJob = std::move(other.mJob);
+        mInPipe = std::move(other.mInPipe);
+        mOutPipe = std::move(other.mOutPipe);
+        mErrPipe = std::move(other.mErrPipe);
+
+        mWaited = other.mWaited;
+        mPid = other.mPid;
     }
 
 } // namespace ulib

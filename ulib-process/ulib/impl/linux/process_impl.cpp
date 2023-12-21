@@ -5,6 +5,7 @@
 
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <fcntl.h>
 #include <ulib/format.h>
 
@@ -14,6 +15,162 @@ extern char **environ;
 
 namespace ulib
 {
+    namespace detail
+    {
+        void MakeExecveArgs(const std::filesystem::path &path, const ulib::list<ulib::u8string> &args) {}
+
+        ulib::list<ulib::u8string> cmdline_to_args(ulib::u8string_view line)
+        {
+            bool inQuotes = false;
+            ulib::u8string curr = line;
+            for (auto &ch : curr)
+            {
+                if (inQuotes)
+                {
+                    if (ch == '\"')
+                    {
+                        inQuotes = false;
+                        ch = 0;
+                    }
+                }
+                else
+                {
+                    if (ch == '\"')
+                    {
+                        inQuotes = true;
+                        ch = 0;
+                    }
+                    else if (ch == ' ')
+                    {
+                        ch = '\0';
+                    }
+                }
+            }
+
+            using ChT = typename ulib::u8string_view::value_type;
+
+            ulib::list<ulib::u8string> result;
+            const char *delim = "\0";
+            auto spl = curr.split(ulib::u8string_view{(ChT *)delim, (ChT *)delim + 1});
+            for (auto word : spl)
+            {
+                result.push_back(word);
+            }
+
+            return result;
+        }
+
+        ulib::u8string u8path_to_artifact_name(ulib::u8string_view path)
+        {
+            ulib::u8string firstArg;
+            ulib::u8string callStr{path};
+            size_t pos = callStr.rfind('/');
+            if (pos == ulib::npos)
+            {
+                firstArg = callStr;
+            }
+            else
+            {
+                size_t idx = pos + 1;
+                // printf("idx: %d, diff: %d\n", (int)idx, (int)(callStr.size() - idx));
+
+                firstArg = callStr.substr(idx, callStr.size() - idx);
+            }
+
+            return firstArg;
+        }
+
+        void closefd(int fd)
+        {
+            if (fd == -1)
+            {
+                throw process_internal_error{"fd in closefd is invalid"};
+            }
+
+            if (::close(fd) == -1)
+            {
+                throw process_internal_error{"failed close fd"};
+            }
+        }
+
+        void sdup2(int fd1, int fd2)
+        {
+            if (fd1 == -1)
+            {
+                throw process_internal_error{"fd1 in dup2 is invalid"};
+            }
+
+            if (fd2 == -1)
+            {
+                throw process_internal_error{"fd1 in dup2 is invalid"};
+            }
+
+            int rv = ::dup2(fd1, fd2);
+            if (rv == -1)
+            {
+                throw process_internal_error{"failed dup2"};
+            }
+        }
+
+        struct pipe_wrapper
+        {
+            pipe_wrapper()
+            {
+                fd[0] = -1;
+                fd[1] = -1;
+            }
+
+            ~pipe_wrapper()
+            {
+                if (fd[0] != -1)
+                {
+                    detail::closefd(fd[0]);
+                }
+
+                if (fd[1] != -1)
+                {
+                    detail::closefd(fd[1]);
+                }
+            }
+
+            void openfds()
+            {
+                if (::pipe(fd) == -1)
+                {
+                    throw process_internal_error{"failed create pipe"};
+                }
+            }
+
+            void closefd(int idx)
+            {
+                if (fd[idx] != -1)
+                {
+                    detail::closefd(fd[idx]);
+                    fd[idx] = -1;
+                }
+                else
+                {
+                    throw process_internal_error{"attempt to close closed fd"};
+                }
+            }
+
+            int detachfd(int idx)
+            {
+                if (fd[idx] == -1)
+                {
+                    throw process_internal_error{"attempt to detach closed fd"};
+                }
+                else
+                {
+                    int rv = fd[idx];
+                    fd[idx] = -1;
+                    return rv;
+                }
+            }
+
+            int fd[2];
+        };
+    } // namespace detail
 
     process::bpipe::~bpipe() { close(); }
 
@@ -74,116 +231,41 @@ namespace ulib
     size_t process::wpipe::write(const void *buf, size_t size) { return ::write(mHandle, buf, size); }
     size_t process::wpipe::write(ulib::string_view str) { return ::write(mHandle, str.data(), str.size()); }
 
-    process::process() { mHandle = 0; }
+    process::process()
+    {
+        mHandle = 0;
+        mWaited = false;
+    }
     process::process(const std::filesystem::path &path, const ulib::list<ulib::u8string> &args, uint32 flags,
                      std::optional<std::filesystem::path> workingDirectory)
     {
+        mHandle = 0;
+        mWaited = false;
         this->run(path, args, flags, workingDirectory);
     }
     process::process(ulib::u8string_view line, uint32 flags, std::optional<std::filesystem::path> workingDirectory)
     {
+        mHandle = 0;
+        mWaited = false;
         this->run(line, flags, workingDirectory);
     }
 
-    process::process(process &&other)
+    process::process(process &&other) { this->move_init(std::move(other)); }
+
+    process::~process() { this->finish(); }
+
+    process &process::operator=(process &&other)
     {
-        mHandle = other.mHandle;
-        other.mHandle = 0;
-
-        mInPipe = std::move(other.mInPipe);
-        mOutPipe = std::move(other.mOutPipe);
-        mErrPipe = std::move(other.mErrPipe);
-
-        if (mHandle)
-        {
-            // if (is_running())
-            // {
-
-            // }
-        }
-    }
-
-    process::~process()
-    {
-        if (mHandle)
-        {
-            // if (is_running())
-            // {
-
-            // }
-        }
-    }
-
-    process &process::operator=(process &&other) {}
-
-    void MakeExecveArgs(const std::filesystem::path &path, const ulib::list<ulib::u8string> &args) {}
-
-    ulib::list<ulib::u8string> cmdline_to_args(ulib::u8string_view line)
-    {
-        bool inQuotes = false;
-        ulib::u8string curr = line;
-        for (auto &ch : curr)
-        {
-            if (inQuotes)
-            {
-                if (ch == '\"')
-                {
-                    inQuotes = false;
-                    ch = 0;
-                }
-            }
-            else
-            {
-                if (ch == '\"')
-                {
-                    inQuotes = true;
-                    ch = 0;
-                }
-                else if (ch == ' ')
-                {
-                    ch = '\0';
-                }
-            }
-        }
-
-        using ChT = typename ulib::u8string_view::value_type;
-
-        ulib::list<ulib::u8string> result;
-        const char *delim = "\0";
-        auto spl = curr.split(ulib::u8string_view{(ChT *)delim, (ChT *)delim + 1});
-        for (auto word : spl)
-        {
-            result.push_back(word);
-        }
-
-        return result;
-    }
-
-    ulib::u8string u8path_to_artifact_name(ulib::u8string_view path)
-    {
-        ulib::u8string firstArg;
-        ulib::u8string callStr{path};
-        size_t pos = callStr.rfind('/');
-        if (pos == ulib::npos)
-        {
-            firstArg = callStr;
-        }
-        else
-        {
-            size_t idx = pos + 1;
-            // printf("idx: %d, diff: %d\n", (int)idx, (int)(callStr.size() - idx));
-
-            firstArg = callStr.substr(idx, callStr.size() - idx);
-        }
-
-        return firstArg;
+        this->finish();
+        this->move_init(std::move(other));
+        return *this;
     }
 
     void process::run(const std::filesystem::path &path, const ulib::list<ulib::u8string> &args, uint32 flags,
                       std::optional<std::filesystem::path> workingDirectory)
     {
         ulib::u8string callStr{path.u8string()};
-        ulib::u8string firstArg = u8path_to_artifact_name(callStr);
+        ulib::u8string firstArg = detail::u8path_to_artifact_name(callStr);
         firstArg.MarkZeroEnd();
 
         ulib::list<ulib::u8string> zargs = args;
@@ -209,12 +291,12 @@ namespace ulib
 
     void process::run(ulib::u8string_view line, uint32 flags, std::optional<std::filesystem::path> workingDirectory)
     {
-        auto args = cmdline_to_args(line);
+        auto args = detail::cmdline_to_args(line);
         if (args.size() == 0)
             throw process_internal_error{"invalid command line"};
 
         ulib::u8string callStr = args.front();
-        ulib::u8string firstArg = u8path_to_artifact_name(callStr);
+        ulib::u8string firstArg = detail::u8path_to_artifact_name(callStr);
         args.front() = firstArg;
 
         for (auto &arg : args)
@@ -239,6 +321,18 @@ namespace ulib
         }
     }
 
+    void check_flags(uint32 flags)
+    {
+        if (flags & process::pipe_output)
+        {
+            if (flags & process::pipe_stdout)
+                throw process_invalid_flags_error{"pipe_stdout flag is incompatible with pipe_output flag"};
+
+            if (flags & process::pipe_stderr)
+                throw process_invalid_flags_error{"pipe_stderr flag is incompatible with pipe_output flag"};
+        }
+    }
+
     void process::run(const char *path, char **argv, const char *workingDirectory, uint32 flags)
     {
         struct errdata
@@ -246,131 +340,157 @@ namespace ulib
             int type, code;
         };
 
-        int fd_sink[2];
-        int fd_stdin[2];
-        int fd_stdout[2];
-        int fd_stderr[2];
+        detail::pipe_wrapper p_sink, p_stdin, p_stdout, p_stderr;
+
+        check_flags(flags);
 
         if (flags & pipe_stdin)
         {
-            pipe(fd_stdin);
+            p_stdin.openfds();
         }
 
-        if (flags & pipe_stdout)
+        if (flags & pipe_output)
         {
-            pipe(fd_stdout);
+            p_stdout.openfds();
         }
-
-        if (flags & pipe_stderr)
+        else
         {
-            pipe(fd_stderr);
-        }
-
-        pipe(fd_sink);
-
-        if (::fcntl(fd_sink[1], F_SETFD, FD_CLOEXEC) == -1)
-        {
-            // error ...
-        }
-
-        auto close_all_pipes = [&]() {
-            if (flags & pipe_stdin)
-            {
-                close(fd_stdin[0]);
-                close(fd_stdin[1]);
-            }
-
             if (flags & pipe_stdout)
             {
-                close(fd_stdout[0]);
-                close(fd_stdout[1]);
+                p_stdout.openfds();
             }
 
             if (flags & pipe_stderr)
             {
-                close(fd_stderr[0]);
-                close(fd_stderr[1]);
+                p_stderr.openfds();
             }
+        }
 
-            close(fd_sink[0]);
-            close(fd_sink[1]);
-        };
+        p_sink.openfds();
 
+        if (::fcntl(p_sink.fd[1], F_SETFD, FD_CLOEXEC) == -1)
+        {
+            throw process_internal_error{"fcntl failed"};
+        }
+
+        int pid_before_fork = getpid();
         int pid = fork();
         if (pid == 0)
         {
-            if (flags & pipe_stdin)
+            try
             {
-                int fn = fileno(stdin);
-                close(fn);
-                dup2(fd_stdin[0], fn);
-            }
-
-            if (flags & pipe_stdout)
-            {
-                int fn = fileno(stdout);
-                close(fn);
-                dup2(fd_stdout[1], fn);
-            }
-
-            if (flags & pipe_stderr)
-            {
-                int fn = fileno(stderr);
-                close(fn);
-                dup2(fd_stderr[1], fn);
-            }
-
-            close(fd_sink[0]);
-
-            if (workingDirectory)
-            {
-                if (chdir(workingDirectory) == -1)
+                if (flags & die_with_parent)
                 {
-                    errdata ed {1, errno};
-                    ::write(fd_sink[1], &ed, sizeof(errdata));
-                    ::close(fd_sink[1]);
-                    ::_exit(EXIT_FAILURE);
+                    int r = prctl(PR_SET_PDEATHSIG, SIGKILL);
+                    if (r == -1)
+                    {
+                        throw process_internal_error{"prctl failed"};
+                    }
+
+                    if (getppid() != pid_before_fork)
+                    {
+                        throw process_internal_error{"getppid() != pid_before_fork"};
+                    }
                 }
+
+                if (flags & pipe_stdin)
+                {
+                    int fn = fileno(stdin);
+                    detail::closefd(fn);
+                    detail::sdup2(p_stdin.fd[0], fn);
+                }
+
+                if (flags & pipe_output)
+                {
+                    int fn_out = fileno(stdout);
+                    int fn_err = fileno(stderr);
+
+                    detail::closefd(fn_out);
+                    detail::sdup2(p_stdout.fd[1], fn_out);
+
+                    detail::closefd(fn_err);
+                    detail::sdup2(p_stdout.fd[1], fn_err);
+                }
+                else
+                {
+                    if (flags & pipe_stdout)
+                    {
+                        int fn = fileno(stdout);
+                        detail::closefd(fn);
+                        detail::sdup2(p_stdout.fd[1], fn);
+                    }
+
+                    if (flags & pipe_stderr)
+                    {
+                        int fn = fileno(stderr);
+                        detail::closefd(fn);
+                        detail::sdup2(p_stderr.fd[1], fn);
+                    }
+                }
+
+                p_sink.closefd(0);
+
+                if (workingDirectory)
+                {
+                    if (chdir(workingDirectory) == -1)
+                    {
+                        throw errdata{1, errno};
+                    }
+                }
+
+                // child
+                // char *argv[] = {(char *)firstArg.c_str(), NULL};
+                // char *envp[] = {(char *)"some", NULL};
+
+                execve(path, argv, environ);
+                execvp(path, argv);
+
+                throw errdata{0, errno};
             }
-
-            // child
-            // char *argv[] = {(char *)firstArg.c_str(), NULL};
-            // char *envp[] = {(char *)"some", NULL};
-
-            execvp(path, argv);
-            // execve(path, argv, environ);
-
+            catch (const errdata &ed)
             {
-                errdata ed {0, errno};
-                ::write(fd_sink[1], &ed, sizeof(errdata));
-                ::close(fd_sink[1]);
+                ::write(p_sink.fd[1], &ed, sizeof(errdata));
+                p_sink.closefd(1);
+                ::_exit(EXIT_FAILURE);
+            }
+            catch (const std::exception &ex)
+            {
+                perror(ex.what());
+                errdata ed{-1, errno};
+                ::write(p_sink.fd[1], &ed, sizeof(errdata));
+                p_sink.closefd(1);
+                ::_exit(EXIT_FAILURE);
+            }
+            catch (...)
+            {
+                perror("something unexpected was catched");
+
+                errdata ed{-2, errno};
+                ::write(p_sink.fd[1], &ed, sizeof(errdata));
+                p_sink.closefd(1);
                 ::_exit(EXIT_FAILURE);
             }
 
-            // perror(path);
+            
         }
         else if (pid == -1)
         {
-            close_all_pipes();
-
             // fork error
             throw process_internal_error{"fork failed"};
         }
         else
         {
             {
-                close(fd_sink[1]);
+                p_sink.closefd(1);
 
                 errdata ed;
-                int rv = ::read(fd_sink[0], &ed, sizeof(errdata));
+                int rv = ::read(p_sink.fd[0], &ed, sizeof(errdata));
                 if (rv == 0)
                 {
                     // no error
                 }
                 else if (rv == sizeof(errdata))
                 {
-                    close_all_pipes();
-
                     if (ed.type == 0 && ed.code == ENOENT)
                     {
                         // execv
@@ -383,32 +503,40 @@ namespace ulib
                     }
                     else
                     {
-                        throw process_internal_error{ulib::format("({}) errno [{}]: {}", ed.type, ed.code, std::strerror(ed.code))};
+                        throw process_internal_error{
+                            ulib::format("({}) errno [{}]: {}", ed.type, ed.code, std::strerror(ed.code))};
                     }
                 }
                 else if (rv == -1)
                 {
-                    close_all_pipes();
                     throw process_internal_error{"read sink pipe failed"};
+                }
+                else
+                {
+                     throw process_internal_error{"read sink pipe is invalid"};
                 }
             }
 
             if (flags & pipe_stdin)
             {
-                mInPipe = std::move(wpipe{fd_stdin[1]});
-                close(fd_stdin[0]);
+                mInPipe = std::move(wpipe{p_stdin.detachfd(1)});
             }
 
-            if (flags & pipe_stdout)
+            if (flags & pipe_output)
             {
-                mOutPipe = std::move(rpipe{fd_stdout[0]});
-                close(fd_stdout[1]);
+                mOutPipe = std::move(rpipe{p_stdout.detachfd(0)});
             }
-
-            if (flags & pipe_stderr)
+            else
             {
-                mErrPipe = std::move(rpipe{fd_stdout[0]});
-                close(fd_stdout[1]);
+                if (flags & pipe_stdout)
+                {
+                    mOutPipe = std::move(rpipe{p_stdout.detachfd(0)});
+                }
+
+                if (flags & pipe_stderr)
+                {
+                    mErrPipe = std::move(rpipe{p_stderr.detachfd(0)});
+                }
             }
 
             mHandle = pid;
@@ -426,6 +554,7 @@ namespace ulib
             throw ulib::RuntimeError{"waitpid failed"};
         }
 
+        mWaited = true;
         return WEXITSTATUS(wstatus);
     }
 
@@ -447,7 +576,12 @@ namespace ulib
         }
     }
     bool process::is_finished() { return !is_running(); }
-    void process::detach() {} // already detached
+    void process::detach() { destroy_handles(); } // already detached
+    void process::terminate()
+    {
+        if (::kill(mHandle, SIGKILL) == -1)
+            throw process_internal_error{std::strerror(errno)};
+    }
 
     std::optional<int> process::check()
     {
@@ -465,6 +599,47 @@ namespace ulib
         {
             return WEXITSTATUS(wstatus);
         }
+    }
+
+    void process::destroy_pipes()
+    {
+        mInPipe.close();
+        mOutPipe.close();
+        mErrPipe.close();
+    }
+
+    void process::destroy_handles()
+    {
+        mHandle = 0;
+        destroy_pipes();
+    }
+
+    void process::finish()
+    {
+        try
+        {
+            if (this->is_bound())
+                if (!mWaited)
+                    this->terminate();
+
+            destroy_handles();
+        }
+        catch (...)
+        {
+            std::terminate();
+        }
+    }
+
+    void process::move_init(process &&other)
+    {
+        mHandle = other.mHandle;
+        other.mHandle = 0;
+
+        mInPipe = std::move(other.mInPipe);
+        mOutPipe = std::move(other.mOutPipe);
+        mErrPipe = std::move(other.mErrPipe);
+
+        mWaited = other.mWaited;
     }
 
 } // namespace ulib

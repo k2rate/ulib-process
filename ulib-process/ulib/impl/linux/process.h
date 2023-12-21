@@ -19,8 +19,8 @@ namespace ulib
             pipe_stdin = 1,
             pipe_stdout = 2,
             pipe_stderr = 4,
-            spawn_detached = 8,
-            pipe_output = 16,
+            pipe_output = 8,
+            die_with_parent = 16,
             create_new_console = 32,
         };
 
@@ -112,8 +112,11 @@ namespace ulib
         bool is_running();
         bool is_finished();
         void detach();
+        void terminate();
+
         std::optional<int> check();
         inline bool is_bound() { return mHandle != 0; }
+        inline int pid() { return mHandle; }
 
         inline wpipe &in() { return mInPipe; }
         inline rpipe &out() { return mOutPipe; }
@@ -121,12 +124,18 @@ namespace ulib
 
     private:
         void run(const char *path, char **argv, const char* workingDirectory, uint32 flags);
+        void destroy_pipes();
+        void destroy_handles();
+        void finish();
+        void move_init(process&& other);
 
         int mHandle;
 
         wpipe mInPipe;
         rpipe mOutPipe;
         rpipe mErrPipe;
+
+        bool mWaited;
     };
 } // namespace ulib
 
