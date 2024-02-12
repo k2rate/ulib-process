@@ -300,6 +300,8 @@ namespace ulib
         if (!::TerminateProcess(mHandle, 260))
             throw process_internal_error(
                 ulib::format("TerminateProcess failed: {}", win32::detail::GetLastErrorAsString()));
+        
+        mWaited = true;
     }
 
     std::optional<int> process::check()
